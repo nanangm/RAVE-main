@@ -2,9 +2,9 @@ Bootstrap: docker
 From: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 %labels
-    Author "your-name"
-    Purpose "RAVE/CCEdit GPU env for HPC via Apptainer (CUDA 12.1, PyTorch 2.4)"
-    Version "1.0"
+    Author "Minsak"
+    Purpose "RAVE/CCEdit GPU env for HPC via Apptainer (CUDA 12.1, PyTorch 2.4, venv)"
+    Version "1.1"
 
 %environment
     export LC_ALL=C.UTF-8
@@ -18,63 +18,64 @@ From: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
     export HUGGINGFACE_HUB_CACHE=/opt/hf_cache
     export HOST=127.0.0.1
     export PORT=7860
+    # Use venv Python by default for all apptainer exec/shell/run
+    export PATH=/opt/venv/bin:$PATH
 
 %post
     set -ex
     export DEBIAN_FRONTEND=noninteractive
     apt-get update && apt-get install -y --no-install-recommends \
         git curl wget ca-certificates ffmpeg build-essential \
-        python3 python3-dev python3-pip python3-venv \
+        python3 python3-venv python3-pip python3-dev \
         && rm -rf /var/lib/apt/lists/*
-
-    update-alternatives --install /usr/bin/python python /usr/bin/python3 1
 
     mkdir -p /opt/hf_cache /workspace
     chmod -R 777 /opt/hf_cache /workspace
-    python -m pip install --upgrade pip
 
-    # ---------- Constraints to keep NumPy<2 and compatible stack ----------
+    # ---------- Create isolated venv ----------
+    python3 -m venv /opt/venv
+    /opt/venv/bin/pip install --upgrade pip
+
+    # ---------- Constraints to keep NumPy<2 and friends compatible ----------
     cat >/opt/constraints.txt <<'EOF'
-    numpy==1.26.4
-    pillow==10.4.0
-    matplotlib==3.8.4
-    pandas==2.2.2
-    numexpr==2.8.7
-    bottleneck==1.3.8
-    EOF
+numpy==1.26.4
+pillow==10.4.0
+matplotlib==3.8.4
+pandas==2.2.2
+numexpr==2.8.7
+bottleneck==1.3.8
+EOF
 
-    # ---------- Core GPU stack ----------
-    pip install --index-url https://download.pytorch.org/whl/cu121 \
+    # ---------- Core GPU stack (PyTorch cu121) ----------
+    /opt/venv/bin/pip install --index-url https://download.pytorch.org/whl/cu121 \
         torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
         --constraint /opt/constraints.txt
 
     # Scientific stack (ABI-safe)
-    pip install -r /opt/constraints.txt
+    /opt/venv/bin/pip install -r /opt/constraints.txt
 
     # Diffusion & UI
-    pip install diffusers==0.30.3 transformers==4.44.2 accelerate==0.34.2 \
-                xformers==0.0.27.post2 safetensors==0.4.5 \
-                huggingface_hub==0.24.6 gradio==4.44.0 \
-                opencv-python pyyaml tqdm \
-                --constraint /opt/constraints.txt
+    /opt/venv/bin/pip install diffusers==0.30.3 transformers==4.44.2 accelerate==0.34.2 \
+        xformers==0.0.27.post2 safetensors==0.4.5 \
+        huggingface_hub==0.24.6 gradio==4.44.0 \
+        opencv-python pyyaml tqdm \
+        --constraint /opt/constraints.txt
 
-    # Annotator ecosystem
-    # BasicSR from git (avoids old torchvision-internal import), plus common deps
-    pip install "git+https://github.com/XPixelGroup/BasicSR.git" \
-                facexlib realesrgan gfpgan scikit-image==0.22.0 \
-                einops==0.7.0 timm==0.9.16 addict==2.4.0 yapf==0.40.2 \
-                controlnet-aux==0.0.9 onnxruntime-gpu==1.18.1 \
-                --constraint /opt/constraints.txt
-
-    # IMPORTANT: do NOT install the PyPI 'triton'; PyTorch bundles torchtriton
-    pip uninstall -y triton || true
-
+    # Annotators (no PyPI triton; use torchtriton bundled with torch)
+    /opt/venv/bin/pip install \
+        "git+https://github.com/XPixelGroup/BasicSR.git" \
+        facexlib realesrgan gfpgan scikit-image==0.22.0 \
+        einops==0.7.0 timm==0.9.16 addict==2.4.0 yapf==0.40.2 \
+        controlnet-aux==0.0.9 onnxruntime-gpu==1.18.1 \
+        --constraint /opt/constraints.txt \
+      && /opt/venv/bin/pip uninstall -y triton || true
 
 %runscript
     # Usage:
-    #   apptainer run --nv --bind /path/to/RAVE-main:/workspace/RAVE-main <sif>
-    #   (or) apptainer exec --nv --bind ... <sif> bash
+    #   apptainer run --nv --bind /path/to/RAVE-main:/workspace/RAVE-main rave_clean.sif
+    # (or) apptainer exec --nv --bind ... rave_clean.sif bash
     set -e
+    export PATH=/opt/venv/bin:$PATH
     cd /workspace || true
     if [ -f /workspace/RAVE-main/webui.py ]; then
       cd /workspace/RAVE-main
@@ -86,15 +87,10 @@ From: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
     fi
 
 %help
-    This image provides a CUDA 12.1 environment for RAVE/CCEdit-style video editing:
-      - PyTorch 2.4.0 + cu121, torchvision 0.19.0
-      - NumPy 1.26.4 (ABI-safe), pandas 2.2.2, numexpr/bottleneck pinned
-      - diffusers 0.30.3, transformers 4.44.2, accelerate 0.34.2, xformers 0.0.27.post2
-      - annotators: BasicSR (git), facexlib, realesrgan, gfpgan, zoedepth, controlnet-aux
-      - ffmpeg installed
+    CUDA 12.1 + PyTorch 2.4 (cu121) venv at /opt/venv, pinned NumPy<2.
     Build:
-      apptainer build --fakeroot rave_clean.sif rave_clean.def
+      apptainer build rave_clean.sif rave_clean.def
     Run (GPU):
-      apptainer run --nv --bind /host/RAVE-main:/workspace/RAVE-main rave_clean.sif
-    Or open a shell:
+      apptainer run  --nv --bind /host/RAVE-main:/workspace/RAVE-main rave_clean.sif
+    Shell (GPU):
       apptainer exec --nv --bind /host/RAVE-main:/workspace/RAVE-main rave_clean.sif bash
